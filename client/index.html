@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stranger Chat | Real-Time Platform</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="chat-container">
+    <header class="chat-header">
+      <div class="status-indicator" id="status-dot"></div>
+      <div class="header-info">
+        <h2>Anonymous Chat</h2>
+        <span id="status-text">Disconnected</span>
+      </div>
+    </header>
+
+    <main class="chat-messages" id="messages-container">
+      <div class="message system-msg">Welcome! Press 'Find Stranger' to begin.</div>
+      <div class="message stranger">Hey! Anyone there?</div>
+      <div class="message user">Hi! Just testing the chat layout.</div>
+    </main>
+
+    <footer class="chat-input-bar">
+      <button id="action-btn" class="btn secondary">Find Stranger</button>
+      <input type="text" id="message-input" placeholder="Type your message..." autocomplete="off" />
+      <button id="send-btn" class="btn primary">Send</button>
+    </footer>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
