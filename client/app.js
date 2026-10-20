@@ -1,56 +1,113 @@
-const messagesContainer = document.getElementById('messages-container');
-const messageInput = document.getElementById('message-input');
-const sendBtn = document.getElementById('send-btn');
-const actionBtn = document.getElementById('action-btn');
-const statusDot = document.getElementById('status-dot');
-const statusText = document.getElementById('status-text');
+document.addEventListener('DOMContentLoaded', () => {
+    const messagesContainer = document.getElementById('messages-container');
+    const messageInput = document.getElementById('message-input');
+    const sendBtn = document.getElementById('send-btn');
+    const skipBtn = document.getElementById('skip-btn');
+    const statusText = document.getElementById('status-text');
+    const statusDot = document.getElementById('status-dot');
 
-// Function to append a message bubble
-function appendMessage(text, sender = 'user') {
-  if (!text.trim()) return;
+    let socket = null;
 
-  const msgDiv = document.createElement('div');
-  msgDiv.classList.add('message', sender);
-  msgDiv.textContent = text;
-  messagesContainer.appendChild(msgDiv);
+    function appendMessage(text, isMe) {
+        if (!messagesContainer) return;
+        const row = document.createElement('div');
+        row.className = isMe ? 'message-row sent' : 'message-row received';
 
-  // Auto-scroll to the latest message
-  messagesContainer.scrollTop = messagesContainer.scrollHeight;
-}
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        bubble.textContent = text;
 
-// Send message on click
-sendBtn.addEventListener('click', () => {
-  const text = messageInput.value;
-  if (text.trim() !== '') {
-    appendMessage(text, 'user');
-    messageInput.value = '';
-    messageInput.focus();
-  }
-});
+        row.appendChild(bubble);
+        messagesContainer.appendChild(row);
+        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    }
 
-// Send message on Enter key
-messageInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    sendBtn.click();
-  }
-});
+    function appendSystemMessage(text) {
+        if (!messagesContainer) return;
+        const div = document.createElement('div');
+        div.className = 'system-message';
+        div.textContent = text;
+        messagesContainer.appendChild(div);
+        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    }
 
-// Mock toggle connection state (for testing UI prior to C++ backend)
-actionBtn.addEventListener('click', () => {
-  const isDisconnected = statusText.textContent === 'Disconnected';
-  if (isDisconnected) {
-    statusDot.classList.add('connected');
-    statusText.textContent = 'Connected to Stranger';
-    actionBtn.textContent = 'Skip / Next';
-    actionBtn.classList.remove('secondary');
-    actionBtn.classList.add('primary');
-    appendMessage('You are now paired with a stranger. Say hi!', 'system-msg');
-  } else {
-    statusDot.classList.remove('connected');
-    statusText.textContent = 'Disconnected';
-    actionBtn.textContent = 'Find Stranger';
-    actionBtn.classList.remove('primary');
-    actionBtn.classList.add('secondary');
-    appendMessage('Stranger has disconnected.', 'system-msg');
-  }
+    function connect() {
+        socket = new WebSocket('ws://127.0.0.1:8080/chat');
+
+        socket.onopen = () => {
+            statusText.textContent = 'Connected. Waiting in queue...';
+            statusDot.className = 'status-indicator online';
+        };
+
+        socket.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+
+                if (data.type === 'waiting') {
+                    statusText.textContent = 'Waiting for a stranger...';
+                    appendSystemMessage('Waiting for a stranger to join...');
+                    messageInput.disabled = true;
+                    sendBtn.disabled = true;
+                } else if (data.type === 'paired') {
+                    statusText.textContent = 'Connected to Stranger';
+                    appendSystemMessage('You are now paired with a stranger. Say hi!');
+                    messageInput.disabled = false;
+                    sendBtn.disabled = false;
+                    messageInput.focus();
+                } else if (data.type === 'chat') {
+                    appendMessage(data.message, false);
+                } else if (data.type === 'stranger_disconnected') {
+                    statusText.textContent = 'Stranger disconnected';
+                    appendSystemMessage('Stranger has disconnected.');
+                    messageInput.disabled = true;
+                    sendBtn.disabled = true;
+                }
+            } catch (e) {
+                console.warn('Non-JSON message received:', event.data);
+            }
+        };
+
+        socket.onclose = () => {
+            statusText.textContent = 'Disconnected';
+            statusDot.className = 'status-indicator offline';
+            appendSystemMessage('Connection lost. Reconnecting in 2s...');
+            messageInput.disabled = true;
+            sendBtn.disabled = true;
+            setTimeout(connect, 2000);
+        };
+    }
+
+    function sendMessage() {
+        const text = messageInput.value.trim();
+        if (!text || !socket || socket.readyState !== WebSocket.OPEN) return;
+
+        socket.send(JSON.stringify({ type: 'chat', message: text }));
+        appendMessage(text, true); // true -> aligns to right
+        messageInput.value = '';
+        messageInput.focus();
+    }
+
+    sendBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        sendMessage();
+    });
+
+    messageInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            sendMessage();
+        }
+    });
+
+    skipBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            messagesContainer.innerHTML = '';
+            appendSystemMessage('Looking for a new stranger...');
+            statusText.textContent = 'Searching...';
+            socket.send(JSON.stringify({ type: 'next' }));
+        }
+    });
+
+    connect();
 });
