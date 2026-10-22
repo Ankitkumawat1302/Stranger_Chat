@@ -182,3 +182,21 @@ body {
     opacity: 0.5;
     cursor: not-allowed;
 }
+
+/* Typing Indicator Bar */
+.typing-indicator {
+    padding: 4px 16px;
+    font-size: 12px;
+    font-style: italic;
+    color: #94a3b8;
+    background-color: #1e293b;
+    min-height: 24px;
+    display: flex;
+    align-items: center;
+    transition: opacity 0.2s ease-in-out;
+}
+
+.typing-indicator.hidden {
+    opacity: 0;
+    pointer-events: none;
+}
