@@ -11,6 +11,11 @@ document.addEventListener('DOMContentLoaded', () => {
     let isTypingLocal = false;
     let typingTimeout = null;
 
+    // Step 7: Exponential Backoff Reconnection Variables
+    let reconnectAttempts = 0;
+    let reconnectTimer = null;
+    const MAX_RECONNECT_DELAY = 10000; // 10 seconds ceiling
+
     function appendMessage(text, isMe) {
         if (!messagesContainer) return;
         const row = document.createElement('div');
@@ -50,9 +55,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function connect() {
+        if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+        }
+
+        statusText.textContent = 'Connecting to server...';
+        statusDot.className = 'status-indicator offline';
+
         socket = new WebSocket('ws://127.0.0.1:8080/chat');
 
         socket.onopen = () => {
+            console.log('[WS] Connected to C++ backend!');
+            reconnectAttempts = 0; // Reset counter on successful link
             statusText.textContent = 'Connected. Waiting in queue...';
             statusDot.className = 'status-indicator online';
         };
@@ -92,13 +107,26 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         socket.onclose = () => {
-            statusText.textContent = 'Disconnected';
+            console.log('[WS] Connection closed');
             statusDot.className = 'status-indicator offline';
-            appendSystemMessage('Connection lost. Reconnecting in 2s...');
             messageInput.disabled = true;
             sendBtn.disabled = true;
             setTypingStatus(false);
-            setTimeout(connect, 2000);
+
+            // Calculate exponential backoff delay (1.5s, 2.3s, 3.4s, up to 10s)
+            reconnectAttempts++;
+            const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempts), MAX_RECONNECT_DELAY);
+            const seconds = (delay / 1000).toFixed(1);
+
+            statusText.textContent = `Disconnected (Retry in ${seconds}s)`;
+            appendSystemMessage(`Connection lost. Reconnecting in ${seconds}s...`);
+
+            reconnectTimer = setTimeout(connect, delay);
+        };
+
+        socket.onerror = (err) => {
+            console.error('[WS] Socket error observed:', err);
+            socket.close();
         };
     }
 
@@ -106,7 +134,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const text = messageInput.value.trim();
         if (!text || !socket || socket.readyState !== WebSocket.OPEN) return;
 
-        // Reset typing indicator immediately on send
         if (isTypingLocal) {
             isTypingLocal = false;
             clearTimeout(typingTimeout);
@@ -119,7 +146,6 @@ document.addEventListener('DOMContentLoaded', () => {
         messageInput.focus();
     }
 
-    // Keystroke typing detection with debounce
     messageInput.addEventListener('input', () => {
         if (!isTypingLocal) {
             isTypingLocal = true;
