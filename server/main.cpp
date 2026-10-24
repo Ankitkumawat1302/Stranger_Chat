@@ -7,6 +7,7 @@
 #include <deque>
 #include <unordered_map>
 #include <atomic>
+#include <chrono>
 #include <asio.hpp>
 #include <openssl/sha.h>
 #include <openssl/bio.h>
@@ -37,9 +38,9 @@ std::string compute_ws_accept(const std::string& key) {
     return base64_encode(hash, SHA_DIGEST_LENGTH);
 }
 
-std::vector<uint8_t> make_ws_frame(const std::string& payload) {
+std::vector<uint8_t> make_ws_frame(const std::string& payload, uint8_t opcode = 0x81) {
     std::vector<uint8_t> frame;
-    frame.push_back(0x81); // FIN + Text frame
+    frame.push_back(opcode); // 0x81 = Text, 0x89 = Ping
     size_t len = payload.size();
     if (len <= 125) {
         frame.push_back(static_cast<uint8_t>(len));
@@ -124,10 +125,13 @@ Matchmaker g_matchmaker;
 class Session : public std::enable_shared_from_this<Session> {
     tcp::socket socket_;
     asio::streambuf buffer_;
+    asio::steady_timer heartbeat_timer_;
     std::atomic<bool> is_closed_{false};
 
 public:
-    Session(tcp::socket socket) : socket_(std::move(socket)) {}
+    Session(tcp::socket socket)
+        : socket_(std::move(socket)),
+          heartbeat_timer_(socket_.get_executor()) {}
 
     void start() {
         auto self = shared_from_this();
@@ -157,6 +161,7 @@ public:
                                 if (!ec) {
                                     g_matchmaker.join_queue(self);
                                     read_frame();
+                                    start_heartbeat();
                                 }
                             });
                     }
@@ -165,9 +170,17 @@ public:
     }
 
     void send_text(const std::string& text) {
+        send_raw_frame(make_ws_frame(text, 0x81));
+    }
+
+    void send_ping() {
+        send_raw_frame(make_ws_frame("", 0x89));
+    }
+
+    void send_raw_frame(std::vector<uint8_t> frame_data) {
         if (is_closed_) return;
         auto self = shared_from_this();
-        auto frame = std::make_shared<std::vector<uint8_t>>(make_ws_frame(text));
+        auto frame = std::make_shared<std::vector<uint8_t>>(std::move(frame_data));
         asio::post(socket_.get_executor(), [this, self, frame]() {
             if (is_closed_) return;
             asio::async_write(socket_, asio::buffer(*frame),
@@ -175,8 +188,21 @@ public:
         });
     }
 
+    void start_heartbeat() {
+        if (is_closed_) return;
+        auto self = shared_from_this();
+        heartbeat_timer_.expires_after(std::chrono::seconds(25));
+        heartbeat_timer_.async_wait([this, self](std::error_code ec) {
+            if (!ec && !is_closed_) {
+                send_ping();
+                start_heartbeat();
+            }
+        });
+    }
+
     void close() {
         if (is_closed_.exchange(true)) return;
+        heartbeat_timer_.cancel();
         std::error_code ec;
         socket_.shutdown(tcp::socket::shutdown_both, ec);
         socket_.close(ec);
@@ -193,16 +219,25 @@ public:
                     close();
                     return;
                 }
+
+                uint8_t opcode = (*header)[0] & 0x0F;
                 bool masked = ((*header)[1] & 0x80) != 0;
                 uint64_t payload_len = (*header)[1] & 0x7F;
+
+                // Handle Close frame (0x8)
+                if (opcode == 0x8) {
+                    g_matchmaker.leave(self);
+                    close();
+                    return;
+                }
 
                 if (payload_len == 126) {
                     auto ext = std::make_shared<std::vector<uint8_t>>(2);
                     asio::async_read(socket_, asio::buffer(*ext),
-                        [this, self, masked, ext](std::error_code ec, std::size_t) {
+                        [this, self, masked, ext, opcode](std::error_code ec, std::size_t) {
                             if (!ec) {
                                 uint64_t len = ((*ext)[0] << 8) | (*ext)[1];
-                                read_payload(masked, len);
+                                read_payload(masked, len, opcode);
                             } else {
                                 g_matchmaker.leave(self);
                                 close();
@@ -211,35 +246,42 @@ public:
                 } else if (payload_len == 127) {
                     auto ext = std::make_shared<std::vector<uint8_t>>(8);
                     asio::async_read(socket_, asio::buffer(*ext),
-                        [this, self, masked, ext](std::error_code ec, std::size_t) {
+                        [this, self, masked, ext, opcode](std::error_code ec, std::size_t) {
                             if (!ec) {
                                 uint64_t len = 0;
                                 for (int i = 0; i < 8; ++i) len = (len << 8) | (*ext)[i];
-                                read_payload(masked, len);
+                                read_payload(masked, len, opcode);
                             } else {
                                 g_matchmaker.leave(self);
                                 close();
                             }
                         });
                 } else {
-                    read_payload(masked, payload_len);
+                    read_payload(masked, payload_len, opcode);
                 }
             });
     }
 
-    void read_payload(bool masked, uint64_t payload_len) {
+    void read_payload(bool masked, uint64_t payload_len, uint8_t opcode) {
         if (is_closed_) return;
         auto self = shared_from_this();
         size_t extra = masked ? 4 : 0;
         auto buf = std::make_shared<std::vector<uint8_t>>(payload_len + extra);
 
         asio::async_read(socket_, asio::buffer(*buf),
-            [this, self, buf, masked, payload_len](std::error_code ec, std::size_t) {
+            [this, self, buf, masked, payload_len, opcode](std::error_code ec, std::size_t) {
                 if (ec) {
                     g_matchmaker.leave(self);
                     close();
                     return;
                 }
+
+                // If Pong frame (0xA), simply resume reading next frame
+                if (opcode == 0xA) {
+                    read_frame();
+                    return;
+                }
+
                 std::vector<uint8_t> mask(4, 0);
                 size_t offset = 0;
                 if (masked) {
@@ -251,6 +293,7 @@ public:
                 for (size_t i = 0; i < payload_len; ++i) {
                     msg.push_back(static_cast<char>((*buf)[offset + i] ^ mask[i % 4]));
                 }
+                
                 g_matchmaker.handle_message(self, msg);
                 read_frame();
             });
@@ -303,7 +346,6 @@ void Matchmaker::handle_message(std::shared_ptr<Session> session, const std::str
 
 void Matchmaker::leave(std::shared_ptr<Session> session) {
     std::lock_guard<std::mutex> lock(mtx_);
-    // Remove from waiting queue if pending
     for (auto it = waiting_queue_.begin(); it != waiting_queue_.end(); ++it) {
         if (it->get() == session.get()) {
             waiting_queue_.erase(it);
@@ -312,14 +354,13 @@ void Matchmaker::leave(std::shared_ptr<Session> session) {
         }
     }
 
-    // Remove from paired sessions
     auto it = pairs_.find(session.get());
     if (it != pairs_.end()) {
         auto partner = it->second;
         pairs_.erase(it);
         pairs_.erase(partner.get());
         partner->send_text("{\"type\":\"stranger_disconnected\"}");
-        std::cout << "[Matchmaker] Paired stranger left. Notified remaining partner and cleaned session map." << std::endl;
+        std::cout << "[Matchmaker] Stranger disconnected, partner notified." << std::endl;
     }
 }
 
